@@ -289,17 +289,14 @@ jobs:
           printf '%s\n' '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/tauri-no-updater.json"
           npm run tauri -- build --ci --bundles deb --features custom-protocol --config "$RUNNER_TEMP/tauri-no-updater.json"
 
-      - name: Collect and inspect finished DEB
+      - name: Inspect finished DEB
         run: |
           set -euo pipefail
-          rm -rf dist
-          mkdir -p dist
-          bash scripts/release/collect-bundle.sh linux target/release/bundle dist
           deb="$(python3 - <<'PY'
           from pathlib import Path
-          found = sorted(Path('dist').glob('*.deb'))
+          found = sorted(Path('target/release/bundle/deb').glob('*.deb'))
           if len(found) != 1:
-              raise SystemExit(f'expected one staged DEB, found {found}')
+              raise SystemExit(f'expected one built DEB, found {found}')
           print(found[0])
           PY
           )"
@@ -315,13 +312,20 @@ jobs:
           set -euo pipefail
           deb="$(python3 - <<'PY'
           from pathlib import Path
-          found = sorted(Path('dist').glob('*.deb'))
+          found = sorted(Path('target/release/bundle/deb').glob('*.deb'))
           if len(found) != 1:
-              raise SystemExit(f'expected one staged DEB, found {found}')
+              raise SystemExit(f'expected one built DEB, found {found}')
           print(found[0])
           PY
           )"
           bash scripts/release/sign-updater-artifact.sh "$deb"
+
+      - name: Collect signed DEB
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          bash scripts/release/collect-bundle.sh linux target/release/bundle dist
 
       - name: Verify Linux artifact contract
         run: bash scripts/release/verify-artifacts.sh "${{ needs.prepare.outputs.version }}" dist linux
