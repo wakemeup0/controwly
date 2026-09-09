@@ -1,0 +1,56 @@
+[package]
+name = "controwly"
+version = "0.1.0"
+default-run = "controwly"
+autobins = false
+description = "Controwly controller input safety manager"
+authors = ["Wakemeup"]
+edition = "2021"
+rust-version = "1.98.0"
+license = "Apache-2.0"
+repository = "https://github.com/wakemeup0/controwly"
+build = "build.rs"
+
+[lib]
+name = "controwly_lib"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "controwly"
+path = "src/main.rs"
+
+[[bin]]
+name = "controwly-linux-input-helper"
+path = "src/bin/controwly-linux-input-helper.rs"
+required-features = ["linux-helper"]
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+linux-helper = []
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_Properties",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

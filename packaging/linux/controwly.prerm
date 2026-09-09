@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+helper=/usr/libexec/controwly-linux-input-helper
+if [ ! -x "$helper" ]; then
+    echo "controwly: refusing package removal while the fixed input helper is unavailable" >&2
+    exit 1
+fi
+
+if ! "$helper" --prepare-removal; then
+    echo "controwly: refusing package removal; controller recovery failed or the removal gate could not be prepared" >&2
+    exit 1
+fi
+
+exit 0

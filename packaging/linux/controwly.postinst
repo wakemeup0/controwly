@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+helper=/usr/libexec/controwly-linux-input-helper
+policy=/usr/share/polkit-1/actions/org.controwly.input.policy
+
+case "${1-}" in
+    configure|abort-upgrade|abort-remove|abort-deconfigure)
+        if [ ! -f "$helper" ] || [ -L "$helper" ] || [ ! -x "$helper" ]; then
+            echo "controwly: refusing to clear the removal gate without the fixed input helper" >&2
+            exit 1
+        fi
+        if [ ! -f "$policy" ] || [ -L "$policy" ]; then
+            echo "controwly: refusing to clear the removal gate without the polkit policy" >&2
+            exit 1
+        fi
+        if ! "$helper" --clear-removal-gate; then
+            echo "controwly: removal gate could not be cleared; controller disables remain blocked" >&2
+            exit 1
+        fi
+        ;;
+esac
+
+exit 0

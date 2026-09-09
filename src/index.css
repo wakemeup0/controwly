@@ -1,0 +1,123 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --background: 222 31% 7%;
+    --foreground: 210 25% 94%;
+    --card: 223 27% 10%;
+    --card-foreground: 210 25% 94%;
+    --popover: 223 27% 12%;
+    --popover-foreground: 210 25% 94%;
+    --primary: 161 82% 54%;
+    --primary-foreground: 222 31% 7%;
+    --secondary: 223 22% 16%;
+    --secondary-foreground: 210 22% 88%;
+    --muted: 223 22% 15%;
+    --muted-foreground: 215 13% 63%;
+    --accent: 224 24% 19%;
+    --accent-foreground: 210 25% 94%;
+    --destructive: 0 74% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 222 21% 23%;
+    --input: 222 21% 27%;
+    --ring: 161 82% 54%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    min-width: 320px;
+    background: hsl(var(--background));
+  }
+
+  body {
+    @apply m-0 min-h-screen bg-background text-foreground antialiased;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  button,
+  [role="button"] {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.22);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  .dashboard-grid {
+    background-image:
+      linear-gradient(hsl(var(--foreground) / 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--foreground) / 0.025) 1px, transparent 1px);
+    background-size: 42px 42px;
+    mask-image: linear-gradient(to bottom, black 0%, transparent 82%);
+  }
+
+  .panel-highlight {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .panel-highlight::before {
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.48), transparent);
+    content: "";
+  }
+
+  .status-dot {
+    @apply inline-block h-2 w-2 rounded-full;
+  }
+
+  .shortcut-key {
+    @apply inline-flex min-w-[2rem] items-center justify-center rounded-md border border-border/90 bg-background/80 px-2 py-1 font-mono text-[0.7rem] font-semibold text-foreground shadow-[inset_0_-1px_0_hsl(var(--foreground)/0.08)];
+  }
+
+  .eyebrow {
+    @apply text-[0.68rem] font-bold uppercase tracking-[0.18em] text-muted-foreground;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

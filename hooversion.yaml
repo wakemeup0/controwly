@@ -1,0 +1,29 @@
+branches:
+  - main
+packages:
+  - name: controwly
+    path: .
+    type: node
+    manifest: package.json
+    changelog: CHANGELOG.md
+    scopes:
+      - controwly
+      - app
+      - ui
+      - native
+      - updater
+      - linux
+      - windows
+      - release
+    dependencies: []
+hooks:
+  afterVersion:
+    - bash scripts/release/sync-native-version.sh
+github:
+  enabled: true
+  # Hooversion creates and pushes the version commit/tag. The release workflow
+  # creates a draft and publishes it only after native assets are verified.
+  releases: false
+  repository: wakemeup0/controwly
+outputDir: .hooversion
+push: true

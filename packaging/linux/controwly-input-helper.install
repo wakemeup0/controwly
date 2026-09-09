@@ -1,0 +1,3 @@
+src-tauri/target/release/controwly-linux-input-helper usr/libexec/controwly-linux-input-helper
+packaging/linux/org.controwly.input.policy usr/share/polkit-1/actions
+packaging/linux/controwly-recovery.tmpfiles usr/lib/tmpfiles.d

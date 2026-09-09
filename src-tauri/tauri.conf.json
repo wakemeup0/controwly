@@ -1,0 +1,88 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Controwly",
+  "version": "0.1.0",
+  "identifier": "io.github.wakemeup0.controwly",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Controwly",
+        "width": 1060,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 560,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true,
+        "focus": true,
+        "decorations": true,
+        "hiddenTitle": false,
+        "theme": "Dark",
+        "backgroundColor": "#0B1020"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self'; font-src 'self' data:; script-src 'self'",
+      "devCsp": "default-src 'self'; connect-src 'self' http://127.0.0.1:1420 ws://127.0.0.1:1420 ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "targets": ["nsis", "deb"],
+    "publisher": "Wakemeup",
+    "copyright": "Copyright (c) 2026 Wakemeup",
+    "category": "Utility",
+    "shortDescription": "Safely manage game-controller input devices",
+    "longDescription": "Controwly safely enumerates and manages supported game-controller input paths.",
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Controwly",
+        "installerHooks": "windows/installer-hooks.nsh"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libgtk-3-0",
+          "libwebkit2gtk-4.1-0",
+          "libayatana-appindicator3-1",
+          "pkexec"
+        ],
+        "files": {
+          "/usr/libexec/controwly-linux-input-helper": "../target/release/controwly-linux-input-helper",
+          "/usr/share/polkit-1/actions/org.controwly.input.policy": "../packaging/linux/org.controwly.input.policy",
+          "/usr/lib/tmpfiles.d/controwly-recovery.conf": "../packaging/linux/controwly-recovery.tmpfiles",
+          "/usr/share/doc/controwly/LICENSE": "../LICENSE",
+          "/usr/share/doc/controwly/THIRD_PARTY_NOTICES": "../THIRD_PARTY_NOTICES"
+        },
+        "preRemoveScript": "../packaging/linux/controwly.prerm",
+        "postInstallScript": "../packaging/linux/controwly.postinst"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3OTAxNzI4QkI1RDRGMEYKUldRUFQxMjdLQmVRbDkzRFN4ZnptOTRVTXU3SHpGK3VzYkZ2bmVyT202RExwUWpzOFovS0IyUFQK",
+      "endpoints": [
+        "https://github.com/wakemeup0/controwly/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

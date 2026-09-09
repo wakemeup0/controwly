@@ -1,0 +1,596 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable vX.Y.Z tag to rebuild and publish; leave empty for a new release from main
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  HOOVERSION_VERSION: 1.1.0
+
+jobs:
+  prepare:
+    name: Prepare immutable version/tag
+    if: >-
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.repository.full_name == github.repository &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
+      ) ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      published: ${{ steps.release.outputs.published }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Checkout trusted source or immutable retry tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha) || github.sha }}
+
+      - name: Install pinned Hooversion
+        uses: openhoo/hooversion/actions/setup@7c5d4a15a55ec06f7e3b0b10af36b9070ea065e7 # v1.1.0
+        with:
+          version: ${{ env.HOOVERSION_VERSION }}
+
+      - name: Configure release author
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare or validate release
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$INPUT_TAG" ]]; then
+            if [[ ! "$INPUT_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::tag must be a stable semantic version prefixed with v (for example v0.1.0)." >&2
+              exit 2
+            fi
+            git fetch --force --no-tags origin "refs/tags/${INPUT_TAG}:refs/tags/${INPUT_TAG}"
+            tag_ref="${INPUT_TAG}^{commit}"
+            tag_commit="$(git rev-parse --verify "$tag_ref")"
+            head_ref='HEAD^{commit}'
+            checked_out_commit="$(git rev-parse --verify "$head_ref")"
+            if [[ "$checked_out_commit" != "$tag_commit" ]]; then
+              echo "::error::checked-out retry tag ${INPUT_TAG} resolved to ${checked_out_commit}, but the fetched tag resolves to ${tag_commit}; refusing a moving tag." >&2
+              exit 1
+            fi
+            git fetch origin main
+            if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+              echo "::error::retry tag ${INPUT_TAG} is not an ancestor of origin/main; refusing an unrelated build." >&2
+              exit 1
+            fi
+            version="${INPUT_TAG#v}"
+            bash scripts/release/verify-manifests.sh "$version"
+            printf '%s\n' \
+              "published=true" \
+              "version=$version" \
+              "tag=$INPUT_TAG" \
+              "commit=$tag_commit" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if ! ci_runs="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&status=completed&per_page=100")"; then
+              echo "::error::could not inspect CI for the exact workflow-dispatch commit ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            if ! jq -e --arg sha "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" \
+              '([.[].workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .path == ".github/workflows/ci.yml" and .event == "push" and .conclusion == "success" and .head_repository.full_name == $repo)] | length) > 0' \
+              <<<"$ci_runs" >/dev/null; then
+              echo "::error::blank workflow dispatch requires a successful CI push run for the exact main commit ${GITHUB_SHA}; use an existing tag to retry release assets." >&2
+              exit 1
+            fi
+          fi
+
+          hooversion doctor
+          hooversion plan
+          before="$(git rev-parse --verify HEAD)"
+          # Hooversion writes the authoritative published/version/tag result to
+          # GITHUB_OUTPUT. Do not infer publication from whether HEAD changed:
+          # v1.1.0 can resume an already-created release without a new commit.
+          hooversion release --no-github
+          after="$(git rev-parse --verify HEAD)"
+          release_state="$(python3 - "$GITHUB_OUTPUT" <<'PY'
+          from __future__ import annotations
+
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          output = Path(sys.argv[1])
+          values: dict[str, str] = {}
+          for line in output.read_text(encoding="utf-8").splitlines():
+              if "=" in line:
+                  key, value = line.split("=", 1)
+                  values[key] = value
+          published = values.get("published")
+          if published not in {"true", "false"}:
+              raise SystemExit("::error::Hooversion did not emit an authoritative published result")
+          try:
+              releases = json.loads(values.get("releases_json", "null"))
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"::error::Hooversion releases_json is invalid: {exc}") from exc
+          if published == "false":
+              if releases != []:
+                  raise SystemExit("::error::Hooversion reported published=false with non-empty releases_json")
+              print("none")
+              raise SystemExit(0)
+          if not isinstance(releases, list) or len(releases) != 1:
+              raise SystemExit("::error::Controwly release workflow requires exactly one Hooversion release output")
+          version = values.get("version", "")
+          tag = values.get("tag", "")
+          release = releases[0]
+          if not isinstance(release, dict) or release.get("version") != version or release.get("tag") != tag:
+              raise SystemExit("::error::Hooversion scalar release outputs do not match releases_json")
+          commit = subprocess.check_output(
+              ["git", "rev-parse", "--verify", "HEAD"], text=True
+          ).strip()
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"commit={commit}\n")
+          print(f"{version}\t{tag}\t{commit}")
+          PY
+          )"
+          if [[ "$release_state" == "none" ]]; then
+            if [[ "$before" != "$after" ]]; then
+              echo "::error::Hooversion reported no release but changed HEAD from ${before} to ${after}" >&2
+              exit 1
+            fi
+            echo "No Conventional Commit release is due; no tag or release was created."
+            exit 0
+          fi
+          IFS=$'\t' read -r version tag commit <<<"$release_state"
+          if [[ "$tag" != "v$version" ]]; then
+            echo "::error::Hooversion returned mismatched version/tag ${version}/${tag}" >&2
+            exit 1
+          fi
+          git fetch origin "refs/tags/${tag}:refs/tags/${tag}"
+          remote_tag_ref="${tag}^{commit}"
+          remote_tag_commit="$(git rev-parse --verify "$remote_tag_ref")"
+          if [[ "$remote_tag_commit" != "$commit" || "$commit" != "$after" ]]; then
+            echo "::error::Hooversion output/tag/HEAD commit mismatch: output=${commit}, tag=${remote_tag_commit}, HEAD=${after}" >&2
+            exit 1
+          fi
+          bash scripts/release/verify-manifests.sh "$version"
+
+  qualify:
+    name: Qualify immutable release commit with CI
+    needs: prepare
+    if: needs.prepare.outputs.published == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.commit }}
+    permissions:
+      contents: read
+  draft:
+    name: Create or reuse draft release
+    needs: [prepare, qualify]
+    if: needs.prepare.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout immutable release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.commit }}
+      - name: Verify immutable release source and tag
+        env:
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: bash scripts/release/verify-release-source.sh "$EXPECTED_COMMIT" "$RELEASE_TAG"
+
+      - name: Create or reuse draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release/ensure-draft-release.sh "${{ needs.prepare.outputs.version }}" "${{ needs.prepare.outputs.tag }}"
+
+  linux:
+    name: Build and sign Linux DEB
+    needs: [prepare, qualify, draft]
+    if: needs.prepare.outputs.published == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.commit }}
+      - name: Verify immutable release source and tag
+        env:
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: bash scripts/release/verify-release-source.sh "$EXPECTED_COMMIT" "$RELEASE_TAG"
+
+      - name: Install Linux Tauri build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.14.0
+          cache: npm
+
+      - name: Install frontend dependencies without signing secrets
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('rust-toolchain.toml').read_text(encoding='utf-8')
+          match = re.search(r'(?m)^channel\s*=\s*["\']([^"\']+)["\']\s*$', text)
+          if not match or match.group(1) != '1.98.0':
+              raise SystemExit('::error::rust-toolchain.toml must pin Rust 1.98.0')
+          PY
+          rustc --version
+
+      - name: Build helper and DEB without signing secrets
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path src-tauri/Cargo.toml --features linux-helper --bin controwly-linux-input-helper
+          printf '%s\n' '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/tauri-no-updater.json"
+          npm run tauri -- build --ci --bundles deb --features custom-protocol --config "$RUNNER_TEMP/tauri-no-updater.json"
+
+      - name: Collect and inspect finished DEB
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          bash scripts/release/collect-bundle.sh linux target/release/bundle dist
+          deb="$(python3 - <<'PY'
+          from pathlib import Path
+          found = sorted(Path('dist').glob('*.deb'))
+          if len(found) != 1:
+              raise SystemExit(f'expected one staged DEB, found {found}')
+          print(found[0])
+          PY
+          )"
+          bash scripts/release/verify-deb.sh "${{ needs.prepare.outputs.version }}" "$deb"
+
+      # Signing secrets are scoped to this one step. They are never inherited
+      # by npm install, Cargo, Tauri's build hooks, or artifact collection.
+      - name: Sign finished DEB updater payload
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          deb="$(python3 - <<'PY'
+          from pathlib import Path
+          found = sorted(Path('dist').glob('*.deb'))
+          if len(found) != 1:
+              raise SystemExit(f'expected one staged DEB, found {found}')
+          print(found[0])
+          PY
+          )"
+          bash scripts/release/sign-updater-artifact.sh "$deb"
+
+      - name: Verify Linux artifact contract
+        run: bash scripts/release/verify-artifacts.sh "${{ needs.prepare.outputs.version }}" dist linux
+
+      - name: Upload Linux workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: controwly-${{ needs.prepare.outputs.tag }}-linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Build and sign Windows NSIS
+    needs: [prepare, qualify, draft]
+    if: needs.prepare.outputs.published == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.commit }}
+      - name: Verify immutable release source and tag
+        env:
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: bash scripts/release/verify-release-source.sh "$EXPECTED_COMMIT" "$RELEASE_TAG"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.14.0
+          cache: npm
+
+      - name: Install frontend dependencies without signing secrets
+        shell: bash
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('rust-toolchain.toml').read_text(encoding='utf-8')
+          match = re.search(r'(?m)^channel\s*=\s*["\']([^"\']+)["\']\s*$', text)
+          if not match or match.group(1) != '1.98.0':
+              raise SystemExit('::error::rust-toolchain.toml must pin Rust 1.98.0')
+          PY
+          rustc --version
+      - name: Test native library without signing secrets
+        shell: bash
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Build NSIS installer without signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/tauri-no-updater.json"
+          npm run tauri -- build --ci --bundles nsis --features custom-protocol --config "$RUNNER_TEMP/tauri-no-updater.json"
+
+      - name: Optional trusted Authenticode signing
+        env:
+          WINDOWS_AUTHENTICODE_REQUIRED: ${{ vars.CONTROWLY_WINDOWS_AUTHENTICODE_REQUIRED || 'false' }}
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ vars.CONTROWLY_WINDOWS_SIGNING_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: pwsh -NoProfile -File scripts/release/sign-windows-installer.ps1 -InstallerRoot target/release/bundle/nsis
+
+      # Tauri updater signing covers the final installer bytes (including any
+      # optional Authenticode signature) and is isolated from all builds.
+      - name: Sign finished NSIS updater payload
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t installers < <(find target/release/bundle/nsis -maxdepth 1 -type f -iname '*setup.exe' -print)
+          if [[ "${#installers[@]}" -ne 1 ]]; then
+            echo "::error::expected exactly one NSIS setup.exe, found ${#installers[@]}" >&2
+            exit 1
+          fi
+          bash scripts/release/sign-updater-artifact.sh "${installers[0]}"
+
+      - name: Collect and verify finished NSIS installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          bash scripts/release/collect-bundle.sh windows target/release/bundle dist
+          bash scripts/release/verify-artifacts.sh "${{ needs.prepare.outputs.version }}" dist windows
+
+      - name: Upload Windows workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: controwly-${{ needs.prepare.outputs.tag }}-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, qualify, draft, linux, windows]
+    if: needs.prepare.outputs.published == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout immutable release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.commit }}
+      - name: Verify immutable release source and tag
+        env:
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: bash scripts/release/verify-release-source.sh "$EXPECTED_COMMIT" "$RELEASE_TAG"
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: controwly-${{ needs.prepare.outputs.tag }}-linux
+          path: dist/linux
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: controwly-${{ needs.prepare.outputs.tag }}-windows
+          path: dist/windows
+
+      - name: Assemble immutable asset directory
+        run: |
+          set -euo pipefail
+          rm -rf dist/final
+          mkdir -p dist/final
+          cp --reflink=auto -- dist/linux/* dist/final/
+          cp --reflink=auto -- dist/windows/* dist/final/
+          test "$(find dist/final -maxdepth 1 -type f | wc -l)" -eq 4
+
+      - name: Verify DEB package and release metadata
+        run: |
+          set -euo pipefail
+          bash scripts/release/verify-manifests.sh "${{ needs.prepare.outputs.version }}"
+          deb="$(python3 - <<'PY'
+          from pathlib import Path
+          found = sorted(Path('dist/final').glob('*.deb'))
+          if len(found) != 1:
+              raise SystemExit(f'expected one DEB, found {found}')
+          print(found[0])
+          PY
+          )"
+          bash scripts/release/verify-deb.sh "${{ needs.prepare.outputs.version }}" "$deb"
+
+      - name: Install pinned rsign2 verifier
+        run: |
+          set -euo pipefail
+          cargo install rsign2 --version 0.6.6 --locked --root "$RUNNER_TEMP/rsign2"
+          rsign_version="$("$RUNNER_TEMP/rsign2/bin/rsign" --version)"
+          if [[ "$rsign_version" != "rsign2 0.6.6" ]]; then
+            echo "::error::unexpected rsign verifier version: ${rsign_version}" >&2
+            exit 1
+          fi
+          echo "$RUNNER_TEMP/rsign2/bin" >> "$GITHUB_PATH"
+
+      # A previous interrupted run may have uploaded exactly one member of an
+      # updater pair. Reconcile complete remote pairs before local verification;
+      # incomplete draft orphans are deleted only after the release is proven a
+      # draft, never after publication.
+      - name: Reconcile complete draft updater pairs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release/sync-draft-assets.sh "${{ needs.prepare.outputs.tag }}" dist/final
+      - name: Re-verify reconciled DEB payload
+        run: |
+          set -euo pipefail
+          deb="$(python3 - <<'PY'
+          from pathlib import Path
+          found = sorted(Path('dist/final').glob('*.deb'))
+          if len(found) != 1:
+              raise SystemExit(f'expected one reconciled DEB, found {found}')
+          print(found[0])
+          PY
+          )"
+          bash scripts/release/verify-deb.sh "${{ needs.prepare.outputs.version }}" "$deb"
+
+      - name: Verify updater signatures and write hashes
+        run: |
+          set -euo pipefail
+          bash scripts/release/verify-tauri-signatures.sh dist/final
+          bash scripts/release/write-checksums.sh dist/final
+
+      - name: Generate updater manifest from verified signatures
+        run: |
+          set -euo pipefail
+          bash scripts/release/generate-updater-manifest.sh \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.tag }}" \
+            dist/final \
+            "${GITHUB_REPOSITORY}"
+      - name: Record immutable source and artifact digests
+        run: |
+          set -euo pipefail
+          bash scripts/release/write-build-metadata.sh \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.tag }}" \
+            "${{ needs.prepare.outputs.commit }}" \
+            dist/final \
+            "${GITHUB_REPOSITORY}"
+
+      - name: Final hash and complete local verification
+        run: |
+          set -euo pipefail
+          bash scripts/release/write-checksums.sh dist/final
+          bash scripts/release/verify-build-metadata.sh \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.tag }}" \
+            "${{ needs.prepare.outputs.commit }}" \
+            dist/final \
+            "${GITHUB_REPOSITORY}"
+          bash scripts/release/verify-tauri-signatures.sh dist/final
+          bash scripts/release/verify-artifacts.sh \
+            "${{ needs.prepare.outputs.version }}" \
+            dist/final \
+            all \
+            "${{ needs.prepare.outputs.tag }}" \
+            "${{ needs.prepare.outputs.commit }}"
+
+      - name: Upload only missing immutable draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release/publish-assets.sh "${{ needs.prepare.outputs.tag }}" dist/final "${GITHUB_REPOSITORY}"
+      - name: Recheck immutable source and tag before publication
+        env:
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: bash scripts/release/verify-release-source.sh "$EXPECTED_COMMIT" "$RELEASE_TAG"
+
+      - name: Publish draft after remote byte verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "${{ needs.prepare.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --title "Controwly ${{ needs.prepare.outputs.version }}" \
+            --notes "Controwly ${{ needs.prepare.outputs.version }}: signed Tauri updater artifacts for Windows NSIS and Linux DEB. Authenticode signing of the Windows installer is optional; Tauri updater signatures and immutable release verification are mandatory."
+
+      - name: Independently verify published release
+        uses: openhoo/hooversion/actions/setup@7c5d4a15a55ec06f7e3b0b10af36b9070ea065e7 # v1.1.0
+        with:
+          version: ${{ env.HOOVERSION_VERSION }}
+
+      - name: Verify published release metadata and hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          draft="$(gh release view "${{ needs.prepare.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)"
+          if [[ "$draft" != false ]]; then
+            echo "::error::release remained draft after publication step" >&2
+            exit 1
+          fi
+          hooversion verify-release --repository "${GITHUB_REPOSITORY}" --tag "${{ needs.prepare.outputs.tag }}"
