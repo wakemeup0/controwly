@@ -2405,8 +2405,13 @@ mod tests {
         let mut aggregate = HidAggregate::new();
         aggregate.add(GENERIC_DESKTOP_PAGE, USAGE_GAME_PAD, false);
         aggregate.mark_inspection_failed();
-        assert!(build_record(&node, &aggregate, std::slice::from_ref(&node), &BTreeMap::new())
-            .is_none());
+        assert!(build_record(
+            &node,
+            &aggregate,
+            std::slice::from_ref(&node),
+            &BTreeMap::new()
+        )
+        .is_none());
     }
 
     #[test]
@@ -2580,22 +2585,23 @@ mod tests {
         unknown_hid.status_known = false;
         let mut hid = HidAggregate::new();
         hid.add(GENERIC_DESKTOP_PAGE, USAGE_GAME_PAD, false);
-        assert!(
-            build_record(&unknown_hid, &hid, std::slice::from_ref(&unknown_hid), &BTreeMap::new())
-                .is_none()
-        );
+        assert!(build_record(
+            &unknown_hid,
+            &hid,
+            std::slice::from_ref(&unknown_hid),
+            &BTreeMap::new()
+        )
+        .is_none());
 
         let mut unknown_xusb = raw(37, "USB\\VID_045E&PID_0B13&MI_00", "XUSB", None, 0, None);
         unknown_xusb.status_known = false;
         unknown_xusb.xusb_interface = true;
-        assert!(
-            build_xusb_record(
-                &unknown_xusb,
-                std::slice::from_ref(&unknown_xusb),
-                &BTreeMap::new()
-            )
-            .is_none()
-        );
+        assert!(build_xusb_record(
+            &unknown_xusb,
+            std::slice::from_ref(&unknown_xusb),
+            &BTreeMap::new()
+        )
+        .is_none());
     }
 
     #[test]
